@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import uuid
 from http import HTTPStatus
 from typing import Any
@@ -7,19 +8,14 @@ from typing import Any
 import aiohttp
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.tts import CONF_LANG, PLATFORM_SCHEMA, Provider, TextToSpeechEntity, TtsAudioType, Voice
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.tts import CONF_LANG, PLATFORM_SCHEMA, Provider, TtsAudioType, Voice
 from homeassistant.const import CONF_AUTHENTICATION
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.core import callback, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import *
 
 _LOGGER = logging.getLogger(__name__)
-
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_AUTHENTICATION): cv.string,
     vol.Optional(CONF_LANG, default=DEFAULT_LANG): vol.In(SUPPORT_LANGUAGES),
@@ -74,7 +70,7 @@ class SaluteSpeechProvider(Provider):
             self._rate
         )
 
-    def get_voice(self, voice: str|None, lang: str | None) -> str:
+    def get_voice(self, voice: str | None, lang: str | None) -> str:
         voice = voice or self._voice
         lang = lang or self._lang
 
@@ -87,8 +83,13 @@ class SaluteSpeechProvider(Provider):
 
 
 class SaluteSpeechCloud:
-    def __init__(self, hass):
+    async_lock = asyncio.Lock()
+    TOKEN_TIMEOUT = 1500  # 25min
+
+    def __init__(self, hass: HomeAssistant):
         self._http_client = async_get_clientsession(hass, False)
+        self.access_token: str | None = None
+        self.access_token_time: int = 0
 
     async def send_text_to_cloud(
             self,
@@ -132,27 +133,31 @@ class SaluteSpeechCloud:
             return None, None
 
     async def get_auth_token(self, base64_auth_token: str) -> str | None:
-        async with asyncio.timeout(10):
-            request = await self._http_client.post(
-                url=API_AUTH_ENDPOINT,
-                headers={
-                    'Authorization': 'Basic {}'.format(base64_auth_token),
-                    'RqUID': str(uuid.uuid4()),
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                data={
-                    'scope': 'SALUTE_SPEECH_PERS',
-                }
-            )
+        async with self.async_lock:  # асинхронно проверять токен должен только 1 поток
+            if time.time() - self.access_token_time < self.TOKEN_TIMEOUT and self.access_token:
+                return self.access_token
+            async with asyncio.timeout(10):
+                request = await self._http_client.post(
+                    url=API_AUTH_ENDPOINT,
+                    headers={
+                        'Authorization': 'Basic {}'.format(base64_auth_token),
+                        'RqUID': str(uuid.uuid4()),
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    data={
+                        'scope': 'SALUTE_SPEECH_PERS',
+                    }
+                )
 
-            if request.status != HTTPStatus.OK:
-                error = await request.read()
-                _LOGGER.error('Error %d on load URL %s. Response %s' % (request.status, request.url, error))
-                return None
+                if request.status != HTTPStatus.OK:
+                    error = await request.read()
+                    _LOGGER.error('Error %d on load URL %s. Response %s' % (request.status, request.url, error))
+                    return None
 
-            data = await request.json()
-
-            return data.get('access_token')
+                data = await request.json()
+                self.access_token = data.get('access_token')
+                self.access_token_time = time.time()
+                return self.access_token
 
 #
 #
