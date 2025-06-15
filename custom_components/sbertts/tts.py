@@ -9,21 +9,35 @@ from typing import Any
 import aiohttp
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.tts import CONF_LANG, PLATFORM_SCHEMA, Provider, TtsAudioType, Voice
+from homeassistant.components.tts import CONF_LANG, PLATFORM_SCHEMA, TtsAudioType, Voice, TextToSpeechEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_AUTHENTICATION
 from homeassistant.core import callback, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.entity import generate_entity_id
 
 from .const import *
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+config_schema_dict = {
     vol.Required(CONF_AUTHENTICATION): cv.string,
     vol.Optional(CONF_LANG, default=DEFAULT_LANG): vol.In(SUPPORT_LANGUAGES),
     vol.Optional(CONF_VOICE, default=DEFAULT_VOICE): vol.In(SUPPORT_VOICES.keys()),
     vol.Optional(CONF_RATE, default=DEFAULT_RATE): vol.In(SUPPORT_RATE),
     vol.Optional(CONF_FLOW_RESTRICTION, default=DEFAULT_FLOW_RESTRICTION): cv.positive_int,
-})
+}
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(config_schema_dict)
+
+
+async def async_setup_entry(
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        async_add_entities,
+):
+    """Setup entities from a config entry created in the integrations UI."""
+    config = hass.data[DOMAIN][config_entry.entry_id]
+    salute_speech = SaluteSpeechProvider(hass, config)
+    async_add_entities([salute_speech], update_before_add=False)
 
 
 async def async_get_engine(hass, config, discovery_info=None):
@@ -31,18 +45,19 @@ async def async_get_engine(hass, config, discovery_info=None):
     return SaluteSpeechProvider(hass, config)
 
 
-class SaluteSpeechProvider(Provider):
+class SaluteSpeechProvider(TextToSpeechEntity):
+    name = 'SaluteSpeech'
 
     def __init__(self, hass, conf):
-        self.name = 'SaluteSpeech'
         self.hass = hass
-
+        self.has_entity = False
         self._client_auth_token = conf[CONF_AUTHENTICATION]
         self._lang = conf[CONF_LANG]
         self._rate = conf[CONF_RATE]
         self._voice = conf[CONF_VOICE]
         self._semaphore_flow_restriction = Semaphore(conf[CONF_FLOW_RESTRICTION])
         self._salute_speech = SaluteSpeechCloud(hass)
+        self.entity_id = generate_entity_id("tts.{}", DOMAIN.lower(), hass=hass)
 
     @property
     def default_language(self):
@@ -163,6 +178,35 @@ class SaluteSpeechCloud:
                 self.access_token = data.get('access_token')
                 self.access_token_time = time.time()
                 return self.access_token
+
+    @classmethod
+    async def request_new_token(cls, base64_auth_token, http_client: aiohttp.ClientSession):
+        async with asyncio.timeout(10):
+            request = await http_client.post(
+                url=API_AUTH_ENDPOINT,
+                ssl=False,
+                headers={
+                    'Authorization': 'Basic {}'.format(base64_auth_token),
+                    'RqUID': str(uuid.uuid4()),
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                data={
+                    'scope': 'SALUTE_SPEECH_PERS',
+                }
+            )
+
+            if request.status != HTTPStatus.OK:
+                error = await request.read()
+                _LOGGER.error(f'Error {request.status} on load URL {request.url}. Response {error}')
+                return None
+
+            data = await request.json()
+            return data.get('access_token')
+
+    @classmethod
+    async def validate_token(cls, token: str) -> None:
+        async with aiohttp.ClientSession() as http_client:
+            return await cls.request_new_token(token, http_client)
 
 #
 #
