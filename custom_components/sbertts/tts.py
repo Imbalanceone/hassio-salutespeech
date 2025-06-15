@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 import uuid
+from asyncio import Semaphore
 from http import HTTPStatus
 from typing import Any
 
@@ -21,6 +22,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_LANG, default=DEFAULT_LANG): vol.In(SUPPORT_LANGUAGES),
     vol.Optional(CONF_VOICE, default=DEFAULT_VOICE): vol.In(SUPPORT_VOICES.keys()),
     vol.Optional(CONF_RATE, default=DEFAULT_RATE): vol.In(SUPPORT_RATE),
+    vol.Optional(CONF_FLOW_RESTRICTION, default=DEFAULT_FLOW_RESTRICTION): cv.positive_int,
 })
 
 
@@ -30,6 +32,7 @@ async def async_get_engine(hass, config, discovery_info=None):
 
 
 class SaluteSpeechProvider(Provider):
+
     def __init__(self, hass, conf):
         self.name = 'SaluteSpeech'
         self.hass = hass
@@ -38,6 +41,7 @@ class SaluteSpeechProvider(Provider):
         self._lang = conf[CONF_LANG]
         self._rate = conf[CONF_RATE]
         self._voice = conf[CONF_VOICE]
+        self._semaphore_flow_restriction = Semaphore(conf[CONF_FLOW_RESTRICTION])
         self._salute_speech = SaluteSpeechCloud(hass)
 
     @property
@@ -63,12 +67,13 @@ class SaluteSpeechProvider(Provider):
         return [Voice(voice, name) for voice, name in voices.items()]
 
     async def async_get_tts_audio(self, message: str, language: str, options: dict[str, Any]) -> TtsAudioType:
-        return await self._salute_speech.send_text_to_cloud(
-            message,
-            self._client_auth_token,
-            self.get_voice(options.get(CONF_VOICE), options.get(CONF_LANG)),
-            self._rate
-        )
+        async with self._semaphore_flow_restriction:  # ограничиваем одновременные потоки в зависимости от тарифа\
+            return await self._salute_speech.send_text_to_cloud(
+                message,
+                self._client_auth_token,
+                self.get_voice(options.get(CONF_VOICE), options.get(CONF_LANG)),
+                self._rate
+            )
 
     def get_voice(self, voice: str | None, lang: str | None) -> str:
         voice = voice or self._voice
