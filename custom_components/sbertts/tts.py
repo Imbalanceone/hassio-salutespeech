@@ -85,6 +85,7 @@ class SaluteSpeechProvider(Provider):
 
 class SaluteSpeechCloud:
     async_lock = asyncio.Lock()
+    TOKEN_TIMEOUT = 1500  # 25min
 
     def __init__(self, hass: HomeAssistant):
         self._http_client = async_get_clientsession(hass, False)
@@ -134,12 +135,9 @@ class SaluteSpeechCloud:
 
     async def get_auth_token(self, base64_auth_token: str) -> str | None:
         async with self.async_lock:  # асинхронно проверять токен должен только 1 поток
-            if time.time() - self.access_token_time < 1500 and self.access_token:  # 25 min
-                _LOGGER.error("return old token")
+            if time.time() - self.access_token_time < self.TOKEN_TIMEOUT and self.access_token:
                 return self.access_token
-            _LOGGER.error("get new token")
             async with asyncio.timeout(10):
-
                 request = await self._http_client.post(
                     url=API_AUTH_ENDPOINT,
                     headers={
